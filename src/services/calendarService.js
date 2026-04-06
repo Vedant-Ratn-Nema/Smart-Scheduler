@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 import { readFileSync } from "fs";
 import { randomUUID } from "crypto";
-import { addDays, formatISO, startOfDay, subMinutes } from "date-fns";
+import { addDays, formatISO, isAfter, isBefore, parseISO, startOfDay, subMinutes } from "date-fns";
 import { config, hasGoogleCalendar } from "../config.js";
 import {
   getOAuthClientFromSavedToken,
@@ -170,6 +170,10 @@ export async function findOverlappingEvents(startISO, endISO) {
   const { calendar } = await getCalendarClient();
   if (!calendar) return [];
 
+  const windowStart = parseISO(startISO);
+  const windowEnd = parseISO(endISO);
+  if (!isBefore(windowStart, windowEnd)) return [];
+
   const response = await calendar.events.list({
     calendarId: config.calendarId,
     timeMin: startISO,
@@ -186,7 +190,16 @@ export async function findOverlappingEvents(startISO, endISO) {
       summary: event.summary || "",
       start: event.start?.dateTime || event.start?.date,
       end: event.end?.dateTime || event.end?.date,
-    }));
+      iCalUID: event.iCalUID || "",
+      recurringEventId: event.recurringEventId || "",
+    }))
+    .filter((event) => {
+      if (!event.start || !event.end) return false;
+      const eventStart = parseISO(event.start);
+      const eventEnd = parseISO(event.end);
+      if (!isBefore(eventStart, eventEnd)) return false;
+      return isBefore(eventStart, windowEnd) && isAfter(eventEnd, windowStart);
+    });
 }
 
 const TITLE_STOP_WORDS = /\b(?:the|a|an|my)\b/gi;
@@ -334,6 +347,11 @@ export async function updateCalendarEventTime(eventId, newStartISO, timeZone = c
     calendarId: config.calendarId,
     eventId,
   });
+  const existingIdentifiers = {
+    id: existing.data.id || eventId,
+    iCalUID: existing.data.iCalUID || "",
+    recurringEventId: existing.data.recurringEventId || "",
+  };
 
   const startStr = existing.data.start?.dateTime;
   const endStr = existing.data.end?.dateTime;
@@ -351,7 +369,17 @@ export async function updateCalendarEventTime(eventId, newStartISO, timeZone = c
   const newEndStr = formatISO(newEnd);
 
   const conflicts = await findOverlappingEvents(newStartStr, newEndStr);
-  const blocking = conflicts.filter((c) => c.id !== eventId);
+  const blocking = conflicts.filter((c) => {
+    if (c.id === existingIdentifiers.id) return false;
+    if (existingIdentifiers.iCalUID && c.iCalUID === existingIdentifiers.iCalUID) return false;
+    if (
+      existingIdentifiers.recurringEventId &&
+      c.recurringEventId === existingIdentifiers.recurringEventId
+    ) {
+      return false;
+    }
+    return true;
+  });
   if (blocking.length) {
     return {
       updated: false,

@@ -5,6 +5,10 @@ import {
   addMinutes,
   endOfDay,
   parseISO,
+  setHours,
+  setMilliseconds,
+  setMinutes,
+  setSeconds,
   startOfDay,
   subMinutes,
 } from "date-fns";
@@ -21,7 +25,7 @@ import {
   updateCalendarEventTime,
   updateCalendarEventTitle,
 } from "../services/calendarService.js";
-import { formatInTimeZone } from "date-fns-tz";
+import { formatInTimeZone, fromZonedTime, toZonedTime } from "date-fns-tz";
 import { findAvailableSlots, formatSlotLabel, zonedStartOfDay } from "../utils/slotFinder.js";
 import { extractConstraintsFromText } from "../utils/timeParser.js";
 
@@ -467,6 +471,44 @@ function isNewBookingIntent(userText) {
   return false;
 }
 
+function hasSchedulingKeyword(userText) {
+  const t = userText.toLowerCase();
+  return (
+    /\b(book|schedule|set\s*up|arrange|find|look\s+for)\b/i.test(t) &&
+    /\b(meeting|call|appointment|slot|time)\b/i.test(t)
+  );
+}
+
+function isFreshSchedulingRequestWithoutWindow(userText, parsedPatch) {
+  if (!hasSchedulingKeyword(userText)) return false;
+  if (isRescheduleIntent(userText)) return false;
+  return !(
+    parsedPatch.windowStartISO ||
+    parsedPatch.windowEndISO ||
+    parsedPatch.dayPart ||
+    (parsedPatch.preferredDays?.length ?? 0) > 0 ||
+    Number.isInteger(parsedPatch.preferredStartHour) ||
+    Number.isInteger(parsedPatch.notBeforeHour) ||
+    Number.isInteger(parsedPatch.notAfterHour)
+  );
+}
+
+function resetTemporalConstraints(existing) {
+  return {
+    ...existing,
+    dayPart: null,
+    preferredDays: [],
+    avoidDays: [],
+    windowStartISO: null,
+    windowEndISO: null,
+    notBeforeHour: undefined,
+    notAfterHour: undefined,
+    preferredStartHour: undefined,
+    preferredStartMinute: undefined,
+    afterLastMeetingBufferMinutes: undefined,
+  };
+}
+
 function isRescheduleIntent(userText) {
   const t = userText.toLowerCase();
   if (/\breschedule\b/i.test(t)) return true;
@@ -486,16 +528,41 @@ function isRescheduleIntent(userText) {
 
 function parseRescheduleDateTime(userText, now) {
   const results = chrono.parse(userText, now, { forwardDate: true });
-  if (!results.length) return { date: null, needsTime: false, unclear: true };
+  if (!results.length) {
+    return { date: null, needsTime: false, unclear: true, hasExplicitDate: false };
+  }
   const start = results[0].start;
   const date = start.date();
   if (!date || Number.isNaN(date.getTime())) {
-    return { date: null, needsTime: false, unclear: true };
+    return { date: null, needsTime: false, unclear: true, hasExplicitDate: false };
   }
+  const lower = userText.toLowerCase();
+  const hasExplicitDate =
+    start.isCertain("day") ||
+    start.isCertain("month") ||
+    start.isCertain("year") ||
+    start.isCertain("weekday") ||
+    /\b(today|tomorrow|tonight|next|this)\b/.test(lower) ||
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(lower) ||
+    /\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b/.test(
+      lower,
+    ) ||
+    /\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/.test(lower);
   if (!start.isCertain("hour")) {
-    return { date, needsTime: true, unclear: false };
+    return { date, needsTime: true, unclear: false, hasExplicitDate };
   }
-  return { date, needsTime: false, unclear: false };
+  return { date, needsTime: false, unclear: false, hasExplicitDate };
+}
+
+function mergeTimeOntoDateInTimeZone(dateOnlyInstant, timeInstant, timeZone) {
+  const tz = timeZone || "UTC";
+  const dateWallTime = toZonedTime(dateOnlyInstant, tz);
+  const timeWallTime = toZonedTime(timeInstant, tz);
+  let merged = setHours(dateWallTime, timeWallTime.getHours());
+  merged = setMinutes(merged, timeWallTime.getMinutes());
+  merged = setSeconds(merged, 0);
+  merged = setMilliseconds(merged, 0);
+  return fromZonedTime(merged, tz);
 }
 
 /** Resolve an event when the user’s message mentions the calendar title (fuzzy match). */
@@ -697,6 +764,12 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
         state,
       };
     }
+    if (!parsedPending.hasExplicitDate) {
+      return {
+        message: `Please include the day as well, for example: “Wednesday at 4:00 PM.”`,
+        state,
+      };
+    }
     const movedPending = await updateCalendarEventTime(
       state.pendingRescheduleEventId,
       parsedPending.date.toISOString(),
@@ -732,7 +805,10 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
       state.reschedulePickList = null;
       const parsedPick = parseRescheduleDateTime(rest.length >= 3 ? rest : "", new Date());
       if (rest.length >= 3 && !parsedPick.unclear && parsedPick.date && !parsedPick.needsTime) {
-        const movedPick = await updateCalendarEventTime(item.id, parsedPick.date.toISOString(), tz);
+        const movedAt = parsedPick.hasExplicitDate
+          ? parsedPick.date
+          : mergeTimeOntoDateInTimeZone(parseISO(item.startISO), parsedPick.date, tz);
+        const movedPick = await updateCalendarEventTime(item.id, movedAt.toISOString(), tz);
         if (!movedPick.updated) {
           state.pendingRescheduleEventId = item.id;
           return {
@@ -742,7 +818,7 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
             state,
           };
         }
-        const whenSpoken = formatSlotLabel(parsedPick.date, tz);
+        const whenSpoken = formatSlotLabel(movedAt, tz);
         return {
           message: `Updated — “${item.summary}” is now at ${whenSpoken}.`,
           state,
@@ -851,6 +927,13 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
         state,
       };
     }
+    if (!parsed.hasExplicitDate) {
+      state.pendingRescheduleEventId = targetEventId;
+      return {
+        message: `Sure — what day should I move it to at that time?`,
+        state,
+      };
+    }
 
     const moved = await updateCalendarEventTime(targetEventId, parsed.date.toISOString(), tz);
     if (!moved.updated) {
@@ -944,6 +1027,9 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
       state,
     };
   }
+  if (state.onboardingStep === "done" && isFreshSchedulingRequestWithoutWindow(userText, parsedPatch)) {
+    state.constraints = resetTemporalConstraints(state.constraints);
+  }
   state.constraints = mergeConstraints(state.constraints, parsedPatch);
 
   const participants = getParticipantEmails(state.attendeeEmails);
@@ -1008,7 +1094,7 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
     }
     return {
       message: created.conflict
-        ? `That slot just got taken by "${created.conflict.summary || "another event"}". Want me to find the next best time?`
+        ? `That time is no longer available because "${created.conflict.summary || "another event"}" overlaps it. Would you like the next best options?`
         : `I had your time, but couldn’t create the event: ${created.reason}.`,
       state,
     };
@@ -1101,7 +1187,7 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
 
     state.lastSuggestedSlots = slots;
     return {
-      message: `That stretch is pretty packed. Here are a few alternatives: ${slotListToSpeechFriendlyText(
+      message: `That window is currently full. Here are the next best options: ${slotListToSpeechFriendlyText(
         slots,
         tz,
       )}. Which works for you?`,
