@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Scheduler AI Agent</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="app-header">
+        <div class="brand">
+          <h1>Smart Scheduler</h1>
+          <p class="subtitle">
+            Book a time with the host — speak or type in plain language.
+          </p>
+        </div>
+        <label class="tz-label">
+          <span class="tz-label-text">Time zone</span>
+          <select id="timezoneSelect" aria-label="Time zone for scheduling"></select>
+        </label>
+      </header>
+
+      <section id="chat" class="chat"></section>
+
+      <form id="chatForm" class="composer">
+        <input
+          id="textInput"
+          type="text"
+          placeholder="Example: Find me a 45-minute slot Tuesday afternoon"
+          autocomplete="off"
+          required
+        />
+        <button type="submit">Send</button>
+      </form>
+
+      <div class="voice-actions">
+        <button id="micBtn" type="button">🎤 Push to Talk</button>
+        <label>
+          <input id="ttsToggle" type="checkbox" checked />
+          Speak agent responses
+        </label>
+      </div>
+
+      <div class="session-addon" aria-label="Follow-up actions for this chat">
+        <span class="session-addon-label">Same chat</span>
+        <div class="session-addon-actions">
+          <button type="button" class="session-action" data-send="I'd like to book another meeting.">
+            Book another
+          </button>
+          <button
+            type="button"
+            class="session-action"
+            data-send="Reschedule my last meeting — move it to "
+          >
+            Reschedule last
+          </button>
+          <button type="button" class="session-action" data-send="Rename the last meeting to ">
+            Rename last
+          </button>
+          <button type="button" class="session-action" data-send="List my meetings with the host">
+            My meetings
+          </button>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
