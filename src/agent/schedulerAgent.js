@@ -526,13 +526,34 @@ function isRescheduleIntent(userText) {
   return false;
 }
 
-function parseRescheduleDateTime(userText, now) {
+function parseChronoResultInTimezone(result, timeZone) {
+  const tz = timeZone || "UTC";
+  const known = result.start?.knownValues || {};
+  const implied = result.start?.impliedValues || {};
+  const pick = (k, fallback) => {
+    const v = known[k] ?? implied[k];
+    return Number.isFinite(v) ? v : fallback;
+  };
+  const nowInTz = toZonedTime(new Date(), tz);
+  const year = pick("year", nowInTz.getFullYear());
+  const month = pick("month", nowInTz.getMonth() + 1);
+  const day = pick("day", nowInTz.getDate());
+  const hour = pick("hour", 9);
+  const minute = pick("minute", 0);
+  const second = pick("second", 0);
+
+  // Build a wall-clock date/time in user's timezone, then convert to UTC instant.
+  const wallClock = new Date(Date.UTC(year, month - 1, day, hour, minute, second, 0));
+  return fromZonedTime(wallClock, tz);
+}
+
+function parseRescheduleDateTime(userText, now, timeZone) {
   const results = chrono.parse(userText, now, { forwardDate: true });
   if (!results.length) {
     return { date: null, needsTime: false, unclear: true, hasExplicitDate: false };
   }
   const start = results[0].start;
-  const date = start.date();
+  const date = parseChronoResultInTimezone(results[0], timeZone);
   if (!date || Number.isNaN(date.getTime())) {
     return { date: null, needsTime: false, unclear: true, hasExplicitDate: false };
   }
@@ -586,6 +607,16 @@ function parseMeetingListIndex(userText) {
   if (onlyNum) return Number(onlyNum[1]);
 
   const ord = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
     first: 1,
     second: 2,
     third: 3,
@@ -750,7 +781,7 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
         state,
       };
     }
-    const parsedPending = parseRescheduleDateTime(userText, new Date());
+    const parsedPending = parseRescheduleDateTime(userText, new Date(), tz);
     if (parsedPending.unclear || !parsedPending.date) {
       return {
         message: `What day and time should I move it to? I’ll keep the same length.`,
@@ -803,7 +834,7 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
       }
       const rest = stripLeadingListPick(userText);
       state.reschedulePickList = null;
-      const parsedPick = parseRescheduleDateTime(rest.length >= 3 ? rest : "", new Date());
+      const parsedPick = parseRescheduleDateTime(rest.length >= 3 ? rest : "", new Date(), tz);
       if (rest.length >= 3 && !parsedPick.unclear && parsedPick.date && !parsedPick.needsTime) {
         const movedAt = parsedPick.hasExplicitDate
           ? parsedPick.date
@@ -838,6 +869,10 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
         state,
       };
     }
+    return {
+      message: `Please pick a meeting number between 1 and ${state.reschedulePickList.length}, then share the new time (for example: “2 Wednesday 3pm”).`,
+      state,
+    };
   }
 
   if (isListMeetingsIntent(userText)) {
@@ -911,7 +946,7 @@ export async function handleSchedulerTurn({ sessionId, userText, timezone, clien
       };
     }
 
-    const parsed = parseRescheduleDateTime(userText, new Date());
+    const parsed = parseRescheduleDateTime(userText, new Date(), tz);
     if (parsed.unclear || !parsed.date) {
       state.pendingRescheduleEventId = targetEventId;
       return {
